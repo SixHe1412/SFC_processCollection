@@ -66,6 +66,7 @@ int main(int argc, char* argv[])
 	char szinput[1024] = { 0 };//1.xyz
 	char szoutput[256] = { 0 };
 	char sztransfile[256] = { 0 };
+	char lvl[10] = { 0 };
 
 	for (int i = 1; i < argc; i++)
 	{
@@ -125,6 +126,12 @@ int main(int argc, char* argv[])
 		{
 			i++;
 			nparallel = atoi(argv[i]);
+			continue;
+		}
+		if (strcmp(argv[i], "-l") == 0)//give the map level
+		{
+			i++;
+			strcpy(lvl, argv[i]);
 			continue;
 		}
 	}
@@ -307,7 +314,7 @@ int main(int argc, char* argv[])
 
 	///////////////////////////////////////////////////////////////////////
 	//////here the redis query tool
-	char lvl[10] = { 0 };
+	//char lvl[10] = { 0 };
 
 	/*redisClusterContext *cc = redisClusterContextInit();
 	redisClusterSetOptionAddNodes(cc, "192.168.0.20:7006,192.168.0.27:7000,192.168.0.28:7001,192.168.0.29:7002,192.168.0.31:7004,192.168.0.32:7005");
