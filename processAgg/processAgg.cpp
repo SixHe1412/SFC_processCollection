@@ -362,6 +362,7 @@ int main(int argc, char* argv[])
 
 			strncpy(sfc_c, reply->element[j]->str, pch - reply->element[j]->str);
 			strcpy(sfc_v, pch + 1);
+			sfc_v[strlen(sfc_v) - 1] = '\0';
 			////decode
 			sfc_bigint val(sfc_v); ///---*give the sfc value**-----
 
