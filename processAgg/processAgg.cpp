@@ -41,10 +41,57 @@ void print_ranges(char * str, vector<sfc_bigint>& ranges)
 	cout << "total ranges len:  " << ntotal_len << endl;
 }
 
+template<int nDims, int mBits>
+struct ptdecode
+{
+	vector<sfc_bigint>& _vec_pts;
+	Point<double, nDims>* _vec_outpts;
+	CoordTransform<double, long, nDims>& _cotrans;
+
+	int _sfctype;
+
+	ptdecode(vector<sfc_bigint>& _pts, Point<double, nDims>* _outpts, CoordTransform<double, long, nDims>& cotrans_, int type_) : \
+		_vec_pts(_pts), _vec_outpts(_outpts), _cotrans(cotrans_), _sfctype(type_) {}
+
+	void operator( )(const blocked_range<size_t> range)const
+	{
+		SFCConversion<nDims, mBits> sfcgen;
+
+		for (size_t i = range.begin(); i != range.end(); ++i)
+		{
+			if (_sfctype == 0)
+				_vec_outpts[i] = _cotrans.InverseTransform(sfcgen.MortonDecode(_vec_pts[i]));
+			else
+				_vec_outpts[i] = _cotrans.InverseTransform(sfcgen.HilbertDecode(_vec_pts[i]));
+		}//end for
+	}//end functioner
+};
+
+
+int integerHash(double delta[], double x, double y)
+{
+	return (x - delta[2]) * 1000000000 + (y - delta[1]) * 10000;
+
+}
+
+string antiHash(double delta[], int key)
+{
+	double val[2] = { 0 };
+	val[0] = (key / 100000) / 10000. + delta[2];
+	val[1] = (key % 100000) / 10000. + delta[1];
+
+
+	ostringstream oss;
+	oss << "{\"x\":" << val[0] << ",\"y\":" << val[1] << ",\"v\":";
+	string res = oss.str();
+
+	return res;
+}
+
 int main(int argc, char* argv[])
 {
 	const int ndims = 3;
-	const int mbits = 18;
+	const int mbits = 13;
 
 	int nsfc_type = 0;
 	int nencode_type = 0;
@@ -118,7 +165,7 @@ int main(int argc, char* argv[])
 		}
 		if (strcmp(argv[i], "-v") == 0)//k times of returned ranes for gap merge
 		{
-			//i++;
+			i++;
 			bstat = true;
 			continue;
 		}
@@ -315,6 +362,7 @@ int main(int argc, char* argv[])
 	///////////////////////////////////////////////////////////////////////
 	//////here the redis query tool
 	//char lvl[10] = { 0 };
+	tbb::tick_count t3 = tbb::tick_count::now();
 
 	/*redisClusterContext *cc = redisClusterContextInit();
 	redisClusterSetOptionAddNodes(cc, "192.168.0.20:7006,192.168.0.27:7000,192.168.0.28:7001,192.168.0.29:7002,192.168.0.31:7004,192.168.0.32:7005");
@@ -337,57 +385,32 @@ int main(int argc, char* argv[])
 		count++;
 	}
 
-	redisReply * reply;
-
-	SFCConversion<ndims, mbits> sfctest;
-
-	Point<long, ndims> inPt;
-	Point<double, ndims> outPt;
-
 	char sfc_c[128];
 	char sfc_v[128];
-	std::map<string, int> map;
-	std::map<string, int>::iterator it;
+	redisReply * reply;
+
+	vector<sfc_bigint> vec_sfc;
+	vector<int> vec_cnt;
+
+	vec_sfc.reserve(count);
+	vec_cnt.reserve(count);
 
 	for (int i = 0; i < count; i++)
 	{
 		redisClusterGetReply(cc, (void **)&reply);
 		for (int j = 0; j < reply->elements; j++)
 		{
-			///(*out_s) << reply->element[j]->str;
 			char* pch = strchr(reply->element[j]->str, ',');
 
-			memset(sfc_c, 0, 256);
-			memset(sfc_v, 0, 256);
+			memset(sfc_c, 0, 128);
+			memset(sfc_v, 0, 128);
 
 			strncpy(sfc_c, reply->element[j]->str, pch - reply->element[j]->str);
 			strcpy(sfc_v, pch + 1);
 			sfc_v[strlen(sfc_v) - 1] = '\0';
-			////decode
-			sfc_bigint val(sfc_v); ///---*give the sfc value**-----
 
-			if (nsfc_type == 0)
-				inPt = sfctest.MortonDecode(val);
-			else
-				inPt = sfctest.HilbertDecode(val);
-
-			for (int k = 0; k < ndims; k++)
-			{
-				//outPt[i] = lround((inPt[i] - _delta[i])*_scale[i]);//encoding
-				outPt[k] = ((double)inPt[k]) / scale[k] + delta[k]; //decoding
-			}
-
-			ostringstream oss;
-			oss << outPt[ndims - 1] << ",\"y\":" << outPt[ndims - 2];
-			string key = oss.str();
-
-			it = map.find(key);
-			if (it == map.end()) {
-				map[key] = atoi(sfc_c);
-			}
-			else {
-				map[key] += atoi(sfc_c);
-			}
+			vec_sfc.push_back(sfc_bigint(sfc_v));
+			vec_cnt.push_back(atoi(sfc_c));
 		}
 		freeReplyObject(reply);
 	}
@@ -395,32 +418,61 @@ int main(int argc, char* argv[])
 
 	redisClusterFree(cc);
 
+	tbb::tick_count t4 = tbb::tick_count::now();
 
-	for (it = map.begin(); it != map.end(); ++it)
-		cout << "{\"x\":" << it->first << ",\"v\":" << it->second << "},";
+	if (bstat)
+		cout << "redis query time = " << (t4 - t3).seconds() << endl;
 
+	///////////////////////////////////////////////////////////////////////
+	////here is the parallel decoding
+	tbb::tick_count t5 = tbb::tick_count::now();
+
+	long pts_size = vec_sfc.size();
+	Point<double, ndims>* p_outpts = new Point<double, ndims>[pts_size];
+
+	parallel_for(blocked_range<size_t>(0, pts_size, 500), ptdecode<ndims, mbits>(vec_sfc, p_outpts, cotrans, nsfc_type));
+
+
+	tbb::tick_count t6 = tbb::tick_count::now();
+
+	if (bstat)
+		cout << "decode time = " << (t6 - t5).seconds() << endl;
 	////////////////////////////////////////////////////////////////////////
 	////here is the merge step
+	tbb::tick_count t7 = tbb::tick_count::now();
 
+	std::map<int, int> map;
+	std::map<int, int>::iterator it;
 
-	/*for (int i = 0; i < count; i++)
+	for (long i = 0; i < pts_size; i++)
 	{
-		ostringstream oss;
-		oss << outPt[ndims - 1] << ",\"y\":" << outPt[ndims - 2];
-		string key = oss.str();
+		/*ostringstream oss;
+		oss << p_outpts[i][ndims - 1] << ",\"y\":" << p_outpts[i][ndims - 2];
+		string key = oss.str();*/
+
+		int key = integerHash(delta, p_outpts[i][ndims - 1], p_outpts[i][ndims - 2]);
 
 		it = map.find(key);
 		if (it == map.end()) {
-			map[key] = pout_item->pPtsArray[i][nDimsR - 1];
+			map[key] = vec_cnt.at(i);
 		}
 		else {
-			map[key] += pout_item->pPtsArray[i][nDimsR - 1];
+			map[key] += vec_cnt.at(i);
 		}
 	}
 
 	for (it = map.begin(); it != map.end(); ++it)
-		cout << "{\"x\":" << it->first << ",\"v\":" << it->second << "},";*/
+		cout << antiHash(delta, it->first) << it->second << "},";
 
+
+	tbb::tick_count t8 = tbb::tick_count::now();
+
+	if (bstat)
+		cout << "merge time = " << (t8 - t7).seconds() << endl;
+
+	////////////////////////////////
+	delete[] p_outpts;
 
 	return 0;
+
 }
